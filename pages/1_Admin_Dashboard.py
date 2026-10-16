@@ -1,50 +1,46 @@
 import streamlit as st
 import plotly.graph_objects as go
+from data.routes import ROUTES
+from data.vehicles import DEFAULT_FLEET
 
 st.title("🎛️ Admin端 · 调度控制台")
-st.caption("面向景区运营调度员")
-
+st.caption("面向景区运营调度员｜仿真辅助决策原型")
+fleet = st.session_state.get("fleet", dict(DEFAULT_FLEET))
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("A线车辆", "5 辆")
-c2.metric("B线车辆", "3 辆")
-c3.metric("车型容量", "22/36/40 座")
-c4.metric("发车间隔", "15–20 min")
-
+c1.metric("A线模拟车队", f"{fleet.get('A', 0)} 辆")
+c2.metric("B线模拟车队", f"{fleet.get('B', 0)} 辆")
+c3.metric("模拟总车队", f"{sum(fleet.values())} 辆")
+c4.metric("访谈参考间隔", "约15–20 min")
+st.caption("车辆数量可以在「智能调度控制」页面调整；初始5+3仅是演示值，不是景区实际车队。")
 st.markdown("---")
-
-col_left, col_right = st.columns([2, 1])
-
-with col_left:
+left, right = st.columns([2, 1])
+with left:
     with st.container(border=True):
         st.subheader("📈 线路长度对比")
         fig = go.Figure(go.Bar(
-            x=["A线 钟灵街游览线", "B线 紫金·钟爱里线"],
-            y=[3.1, 6.5],
+            x=[f"{rid}线 {v['name']}" for rid, v in ROUTES.items()],
+            y=[v["total_length_km"] for v in ROUTES.values()],
             marker_color=["#1E6F5C", "#F6BD16"],
-            text=[3.1, 6.5],
-            textposition="outside",
-        ))
-        fig.update_layout(height=300, yaxis_title="总长度（km）")
+            text=[v["total_length_km"] for v in ROUTES.values()],
+            textposition="outside"))
+        fig.update_layout(height=300, yaxis_title="距离（km）")
         st.plotly_chart(fig, use_container_width=True)
-
-with col_right:
+with right:
     with st.container(border=True):
-        st.subheader("📢 数据状态")
-        st.success("A/B线站序、总长、分段距离已录入")
-        st.warning("逐站客流、折返时间为仿真设定")
-        st.info("数据来源：V2 参数表 + 景区访谈")
-
+        st.subheader("📢 数据来源与边界")
+        st.success("A/B主线路来自公开资料及口头核实")
+        st.warning("分段距离、周转、客流和车队规模含仿真假设")
+        st.info("B线约6.5公里为模型估算，不是景区实测距离。")
 st.markdown("---")
 st.subheader("🧭 快捷入口")
-q1, q2, q3 = st.columns(3)
-with q1:
+c1, c2, c3 = st.columns(3)
+with c1:
     if st.button("🚌 车辆与线路", use_container_width=True):
         st.switch_page("pages/2_Admin_Vehicle_Route.py")
-with q2:
+with c2:
     if st.button("🧠 智能调度", use_container_width=True):
         st.switch_page("pages/4_Admin_Smart_Dispatch.py")
-with q3:
+with c3:
     if st.button("📊 实验分析", use_container_width=True):
         st.switch_page("pages/6_Admin_Experiment_Analysis.py")
-
-st.markdown('<div class="footer-text">⚠️ 本系统为仿真原型，结果由程序生成，不代表景区实测结果。</div>', unsafe_allow_html=True)
+st.caption("研究型仿真结果，不代表景区实际运营效果。")
