@@ -11,11 +11,12 @@ if "experiments" not in st.session_state:
 col1, col2 = st.columns([1, 3])
 with col1:
     if st.button("📝 保存当前实验", type="primary", use_container_width=True):
-        if "result" in st.session_state:
-            r = st.session_state["result"]
+        if "last_result" in st.session_state:
+            r = st.session_state["last_result"]
             st.session_state.experiments.append({
                 "编号": f"E{len(st.session_state.experiments)+1:03d}",
                 "时间": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "运行编号": r["run_id"],
                 "策略": r["strategy"],
                 "A线车辆": r["params"]["fleet"].get("A", 0),
                 "B线车辆": r["params"]["fleet"].get("B", 0),

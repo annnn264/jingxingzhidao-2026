@@ -15,6 +15,7 @@ import math
 
 from data.routes import ROUTES
 from data.segments import SEGMENTS
+from core.demand import demand_multiplier, outbound_fraction, origin_weights
 
 _DIST = {(e["from"], e["to"]): e["distance_km"] for e in SEGMENTS}
 
@@ -24,17 +25,6 @@ def _travel(a, b, speed):
     if d is None or d <= 0:
         raise ValueError(f"优化器缺少路段距离 {a}->{b}")
     return 60.0 * float(d) / speed
-
-
-def _peak(time_min, scenario, multiplier, start_hour):
-    h = start_hour + time_min / 60
-    return multiplier if ((scenario == "上午高峰" and 8 <= h < 11) or
-                          (scenario == "下午高峰" and 14 <= h < 17)) else 1.0
-
-
-def _outbound(time_min, start_hour):
-    h = start_hour + time_min / 60
-    return 0.8 if 8 <= h < 11 else (0.2 if 14 <= h < 17 else 0.5)
 
 
 @dataclass
@@ -79,22 +69,15 @@ def _visits(route, direction, idx, t, speed, dwell):
 
 
 def _forecast_arrivals(mid_t, dt, context, q):
-    """期望客流：在整个景区总到达率中按线路、方向、始发站分配。"""
-    start_hour = context["start_hour"]
-    total = context["arrival_rate"] / 60.0 * dt * _peak(
-        mid_t, context["scenario_type"], context["peak_multiplier"], start_hour
-    )
-    outbound = _outbound(mid_t, start_hour)
+    """按仿真引擎的同一需求假设预测期望到达数（绝不读取未来客流事件）。"""
+    total = context["arrival_rate"] / 60 * dt * demand_multiplier(mid_t, context)
+    outbound = outbound_fraction(mid_t, context)
     for rid, route_weight in context["route_weights"].items():
-        n = len(ROUTES[rid]["stations"])
-        for direction, dir_w in ((1, outbound), (-1, 1 - outbound)):
-            indices = list(range(n - 1)) if direction == 1 else list(range(1, n))
-            raw = [1 / ((j + 1) ** 1.4) for j in indices] if direction == 1 else [
-                1 / ((n - j) ** 1.4) for j in indices]
-            z = sum(raw)
-            for i, value in zip(indices, raw):
-                key = (ROUTES[rid]["stations"][i], direction)
-                q[key] = q.get(key, 0.0) + total * route_weight * dir_w * value / z
+        for direction, weight in ((1, outbound), (-1, 1 - outbound)):
+            for idx, station_weight in origin_weights(rid, direction):
+                sid = ROUTES[rid]["stations"][idx]
+                key = (sid, direction)
+                q[key] = q.get(key, 0.0) + total * route_weight * weight * station_weight
 
 
 def _forward(state, to_t, context):
@@ -205,6 +188,13 @@ def propose_departures(*, now, stations, vehicles, events, last_departure, param
     ctx = {
         "arrival_rate": float(params["arrival_rate"]),
         "scenario_type": params.get("scenario_type", "平峰"),
+        "duration_min": params["duration_min"],
+        "tidal": params.get("tidal", False),
+        "disruption": params.get("disruption", False),
+        "disruption_type": params.get("disruption_type", "客流突增"),
+        "disruption_center": params.get("disruption_center", params["duration_min"] / 2),
+        "disruption_sigma": params.get("disruption_sigma", 30),
+        "disruption_intensity": params.get("disruption_intensity", 2.0),
         "peak_multiplier": float(params.get("peak_multiplier", 2.0)),
         "start_hour": float(params.get("start_hour", 8)),
         "route_weights": route_weights,

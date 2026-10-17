@@ -1,128 +1,140 @@
-import streamlit as st
+"""Admin：三策略真正调用同一仿真引擎，并自动生成User端联调CSV。"""
 from datetime import datetime
+import streamlit as st
+import pandas as pd
+
 from core.simulation import run_simulation
+from core.exporter import zip_content
+from data.vehicles import DEFAULT_FLEET
 
 st.title("🧠 Admin端 · 智能调度控制")
-st.caption("仿真引擎调用入口 · 支持固定/阈值/滚动优化三种策略")
+st.caption("固定间隔 / 排队阈值 / 滚动预测优化：三策略均真实调用同一离散事件引擎")
+st.warning("本项目仅为情景仿真：车队规模、双向原路折返、逐站客流均属假设，不代表景区运营事实。")
 
-# ============================================================
-# 1. 初始化状态
-# ============================================================
 if "fleet" not in st.session_state:
-    st.session_state.fleet = {"A": 5, "B": 3}
-
-if "scenario" not in st.session_state:
-    st.session_state.scenario = {
-        "type": "平峰",
-        "arrival_rate": 120,
-        "duration_min": 600,
-        "seed": 42,
-        "tidal": False,
-        "disruption": False,
-        "disruption_type": "客流突增"
-    }
-sc = st.session_state.scenario
-
-# ============================================================
-# 2. 界面配置
-# ============================================================
-st.markdown("> 20km/h是情景速度上限，不代表景区已核实限速。双向沿相同道路折返属于仿真假设。")
+    st.session_state.fleet = dict(DEFAULT_FLEET)
+sc = st.session_state.get("scenario", {
+    "type": "平峰", "arrival_rate": 120, "duration_min": 600, "seed": 42,
+    "tidal": False, "disruption": False,
+})
 
 with st.container(border=True):
-    st.subheader("🚌 车队配置")
-    col1, col2 = st.columns(2)
+    st.subheader("① 车队配置")
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.session_state.fleet["A"] = st.number_input("A线车辆数（辆）", 1, 20, st.session_state.fleet["A"])
+        st.session_state.fleet["A"] = int(st.number_input(
+            "A线车辆数", min_value=0, max_value=30,
+            value=int(st.session_state.fleet["A"]), step=1))
     with col2:
-        st.session_state.fleet["B"] = st.number_input("B线车辆数（辆）", 1, 20, st.session_state.fleet["B"])
+        st.session_state.fleet["B"] = int(st.number_input(
+            "B线车辆数", min_value=0, max_value=30,
+            value=int(st.session_state.fleet["B"]), step=1))
+    with col3:
+        capacity = st.selectbox("假设单车座位数", [22, 36, 40], index=1)
 
 with st.container(border=True):
-    st.subheader("策略选择")
-    strategy_display = st.radio(
-        "选择调度策略",
-        ["固定调度", "动态阈值调度", "滚动预测优化"],
-        horizontal=True
-    )
-    strategy_map = {"固定调度": "fixed", "动态阈值调度": "dynamic", "滚动预测优化": "optimizer"}
-    selected_strategy = strategy_map[strategy_display]
+    st.subheader("② 调度策略")
+    display = st.radio("选择策略", ["固定调度", "动态阈值调度", "滚动预测优化"], horizontal=True)
+    strategy = {"固定调度": "fixed", "动态阈值调度": "dynamic", "滚动预测优化": "optimized"}[display]
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        fixed_interval = st.slider("固定发车间隔（分钟）", 10, 30, 17)
+    with c2:
+        queue_threshold = st.slider("动态调度排队阈值（人）", 5, 100, 20, 5)
+    with c3:
+        speed = st.slider("假设行驶速度（km/h）", 5, 20, 15)
+    with st.expander("⚙️ 滚动预测优化参数", expanded=(strategy == "optimized")):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            step = st.slider("决策间隔（分钟）", 5, 30, 5, 5)
+        with c2:
+            horizon = st.slider("预测窗口（分钟）", 15, 120, 30, 15)
+        with c3:
+            beam = st.slider("束搜索宽度", 2, 15, 4)
 
-    if strategy_display == "滚动预测优化":
-        with st.expander("⚙️ 优化算法参数（默认可用，必要时调整）", expanded=False):
-            st.slider("决策间隔（分钟）", 5, 30, 10, 5)
-            st.slider("预测窗口（分钟）", 30, 120, 60, 15)
-            st.slider("束搜索宽度", 3, 20, 8, 1)
+params = {
+    "duration_min": int(sc["duration_min"]),
+    "arrival_rate": float(sc["arrival_rate"]),
+    "fleet": dict(st.session_state.fleet),
+    "vehicle_capacities": {rid: [capacity] * n for rid, n in st.session_state.fleet.items()},
+    "speed_kmh": speed,
+    "fixed_interval": fixed_interval,
+    "queue_threshold": queue_threshold,
+    "scenario_type": sc.get("type", "平峰"),
+    "peak_multiplier": 2.0,
+    "tidal": sc.get("tidal", False),
+    "disruption": sc.get("disruption", False),
+    "disruption_type": sc.get("disruption_type", "客流突增"),
+    "disruption_center": sc.get("disruption_center", 300),
+    "disruption_sigma": sc.get("disruption_sigma", 30),
+    "disruption_intensity": sc.get("disruption_intensity", 2.0),
+    "decision_interval_min": step,
+    "prediction_horizon_min": horizon,
+    "beam_width": beam,
+    "snapshot_interval_min": 5,
+}
+seed = int(sc["seed"])
 
-st.markdown("---")
+left, right = st.columns(2)
+with left:
+    run_one = st.button("▶️ 运行所选策略", type="primary", use_container_width=True)
+with right:
+    run_compare = st.button("📊 同场景比较三策略", use_container_width=True)
 
-# ============================================================
-# 3. 运行仿真
-# ============================================================
-if st.button("▶️ 运行所选策略", type="primary", use_container_width=True):
-    with st.spinner("仿真运行中，请稍候..."):
-        params = {
-            "duration_min": sc["duration_min"],
-            "arrival_rate": sc["arrival_rate"],
-            "fleet": st.session_state.fleet,
-            "fixed_interval": 17,
-            "speed_kmh": 15,
-            "queue_threshold": 20,
-            "peak_multiplier": 1.0,
-        }
-        
-        # 注：若 optimizer.py 未实现，这里强制回退到 dynamic，避免报错
-        if selected_strategy == "optimizer":
-            st.info("优化器尚未接入，已自动回退为动态阈值调度。")
-            result = run_simulation(params, strategy="dynamic", seed=sc["seed"])
-        else:
-            result = run_simulation(params, strategy=selected_strategy, seed=sc["seed"])
-            
-        st.session_state["last_result"] = result
-        st.session_state["last_run_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+if run_one or run_compare:
+    try:
+        with st.spinner("仿真计算中……"):
+            if run_one:
+                result = run_simulation(params, strategy=strategy, seed=seed)
+                st.session_state["last_result"] = result
+                st.session_state["result"] = result  # 兼容历史页面
+                st.session_state.pop("comparison", None)
+            else:
+                results = [run_simulation(params, strategy=s, seed=seed)
+                           for s in ("fixed", "dynamic", "optimized")]
+                if len({r["demand_signature"] for r in results}) != 1:
+                    raise RuntimeError("不同策略没有共享同一客流，比较中止")
+                st.session_state["comparison"] = results
+                selected = {r["strategy"]: r for r in results}[strategy]
+                st.session_state["last_result"] = selected
+                st.session_state["result"] = selected
+            st.session_state["last_run_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, RuntimeError) as e:
+        st.error(f"仿真失败，未更新历史结果：{e}")
 
 if "last_result" in st.session_state:
-    st.success("✅ 仿真已完成")
-    st.button("📊 同场景对比三种策略", use_container_width=True)
-
-    st.markdown("---")
     r = st.session_state["last_result"]
-
-    # 直接从引擎返回的字典中提取统计指标
-    avg_wait = r.get("avg_wait", 0.0)
-    max_wait = r.get("max_wait", 0.0)
-    total_arrivals = r.get("total_arrivals", 0)
-    boarded = r.get("boarded", 0)
-    queue_end = r.get("queue_end", 0)
-    total_trips = r.get("total_trips", 0)
-    service_rate = r.get("service_rate", 0.0)
-
+    st.success(f"✅ 已完成仿真（当前查看 {r['strategy']}；运行编号：{r['run_id']}）")
+    st.caption(f"结果对应运行参数：A线 {r['params']['fleet']['A']} 辆，B线 {r['params']['fleet']['B']} 辆，"
+               f"总到达率基准 {r['params']['arrival_rate']} 人/小时；结果不会随输入修改自动更新，请重新运行。")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("全体到达者的观测候车均值", f"{avg_wait:.1f} min")
-    c2.metric("已上车游客P95候车", f"{max_wait:.1f} min") # 暂时用 max_wait 代替
-    c3.metric("未上车人数", f"{queue_end} 人")
-    c4.metric("上车服务率", f"{service_rate:.1f}%")
+    c1.metric("已上车游客的平均候车", f"{r['avg_wait']:.1f} min")
+    c2.metric("已上车游客P95候车", f"{r['p95_wait']:.1f} min")
+    c3.metric("仿真末仍未上车", f"{r['unserved']} 人")
+    c4.metric("上车服务率", f"{r['service_rate']*100:.1f}%")
+    st.info(f"到达 {r['total_arrivals']} 人；已上车 {r['served']} 人（其中已下车 {r['completed']} 人、"
+            f"仍在车上 {r['onboard_end']} 人）；发车 {r['total_departures']} 趟。"
+            "均值/P95基于已上车游客，全体到达游客的观测候车均值为 "
+            f"{r['avg_observed_wait_all']:.1f} 分钟（未上车者仅计至仿真结束）。")
+    if "comparison" in st.session_state:
+        st.subheader("同一客流/同一车队：三策略对比")
+        rows = []
+        for item in st.session_state["comparison"]:
+            rows.append({"策略": item["strategy"], "总到达": item["total_arrivals"],
+                         "已上车": item["served"], "未上车": item["unserved"],
+                         "上车服务率(%)": round(item["service_rate"] * 100, 1),
+                         "全体观测候车均值(min)": round(item["avg_observed_wait_all"], 2),
+                         "已上车P95(min)": round(item["p95_wait"], 2),
+                         "发车趟数": item["total_departures"],
+                         "客流签名": item["demand_signature"]})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.caption("优化器是束搜索近似MPC。发车趟数不同，效果比较需同时考虑运营成本，不能仅凭候车时间宣称最优。")
 
-    st.markdown("---")
-    
-    # 动态拼接场景文案
-    scenario_text = f"**【{sc.get('type', '平峰')}】场景**"
-    if sc.get("tidal", False):
-        scenario_text += " + **节假日潮汐客流**"
-    if sc.get("disruption", False):
-        scenario_text += f" + **突发情况：{sc.get('disruption_type', '客流突增')}**"
-
-    st.markdown(f"""
-    #### 📋 仿真结果复原
-    
-    **场景复现**：基于您设置的 {scenario_text}  
-    **运力配置**：A线 {st.session_state.fleet['A']} 辆，B线 {st.session_state.fleet['B']} 辆。  
-    **运营成果**：共到达 **{total_arrivals}** 人，成功上车 **{boarded}** 人，期末仍在排队 **{queue_end}** 人；总发车 **{total_trips}** 趟。  
-    **服务指标**：上车服务率 **{service_rate:.1f}%**。  
-    """)
-
-    st.markdown("*注：已观察候车均值对未上车游客统计到仿真截止时为止的等待，属于损失下界；不是所有游客最终完整候车时长。*")
-
+    st.subheader("📦 同次仿真结果导出")
+    st.download_button("⬇️ 下载4份联调CSV（ZIP）", data=zip_content(r),
+                       file_name=f"jingxing_user_data_{r['run_id']}.zip",
+                       mime="application/zip", use_container_width=True)
+    st.caption("ZIP包含 od_flow.csv、station_state.csv、vehicle_state.csv、passenger_results.csv；"
+               "全部来自当前同一次仿真。请在接入既有User端前核对表头，不会覆盖昨天的样例文件。")
 else:
-    st.info("👈 请点击上方按钮开始仿真。")
-
-st.markdown("---")
-st.warning("⚠️ 研究型仿真，数据含地图估算和模型假设，不代表景区实测或实际优化效果。")
+    st.info("请先设置客流场景，再运行仿真。")

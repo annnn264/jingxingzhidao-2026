@@ -1,9 +1,10 @@
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
+from core.demand import demand_multiplier, outbound_fraction
 
 st.title("👥 Admin端 · 客流场景设置")
-st.caption("所有客流数据均为仿真设定（D类），不代表景区实测值")
+st.caption("基准到达率指A+B两线合计每小时待乘车游客数（非每站、非景区总游客数）；均为仿真假设")
 
 # ============ 初始化状态 ============
 if "scenario" not in st.session_state:
@@ -46,7 +47,7 @@ with st.container(border=True):
 # ============ 突发情况 ============
 with st.container(border=True):
     st.subheader("③ 突发情况模拟")
-    st.caption("模拟客流突增、骤降等异常事件")
+    st.caption("模拟客流突增、骤降等异常事件；‘骤降’的2倍影响表示客流降为原来的1/2")
     sc["disruption"] = st.checkbox("启用突发情况", value=sc["disruption"])
 
     if sc["disruption"]:
@@ -58,13 +59,17 @@ with st.container(border=True):
         col1, col2, col3 = st.columns(3)
         with col1:
             sc["disruption_center"] = st.number_input(
-                "触发时刻（分钟）", 0, sc["duration_min"], sc["disruption_center"], 15)
+                "触发时刻（分钟）", 0, sc["duration_min"], min(sc["disruption_center"], sc["duration_min"]), 15)
         with col2:
             sc["disruption_sigma"] = st.number_input(
                 "持续宽度（分钟）", 5, 180, sc["disruption_sigma"], 5)
         with col3:
+            is_drop = sc["disruption_type"] == "客流骤降"
+            intensity_label = "骤降强度（2 表示降到原来的 1/2）" if is_drop else "影响强度（倍）"
+            # 脉冲过中心时: 突增/双向为倍率x，骤降为原来的1/x；避免“骤降”反而增长。
+            intensity_now = max(1.0, min(5.0, float(sc["disruption_intensity"])))
             sc["disruption_intensity"] = st.slider(
-                "影响强度（倍）", 0.2, 5.0, sc["disruption_intensity"], 0.1)
+                intensity_label, 1.0, 5.0, intensity_now, 0.1)
 
 sc["seed"] = st.number_input("随机种子", 0, 9999, sc["seed"])
 
@@ -73,69 +78,25 @@ sc["seed"] = st.number_input("随机种子", 0, 9999, sc["seed"])
 # 核心：生成客流曲线（基础 + 潮汐 + 突发）
 # ================================================================
 def generate_curve(sc):
-    """
-    返回：
-        t                 : 时间点列表
-        y_up              : 上行（上山/进景区）到达人数
-        y_down            : 下行（下山/出景区）到达人数
-    """
+    """与core/simulation.py一致的15分钟期望客流曲线；真实生成还会泊松抽样。"""
     t = np.arange(0, sc["duration_min"], 15)
-    base = sc["arrival_rate"] / 4  # 每15分钟基础人数
-
-    # -------- 1. 基础曲线 --------
-    if sc["type"] == "平峰":
-        y_up = base * (1 + 0.1 * np.sin(t / 60 * np.pi)) * 0.6
-        y_down = base * (1 + 0.1 * np.cos(t / 60 * np.pi)) * 0.4
-
-    elif sc["type"] == "上午高峰":
-        center = sc["duration_min"] * 0.25
-        sigma = sc["duration_min"] * 0.15
-        peak = np.exp(-((t - center) ** 2) / (2 * sigma ** 2))
-        y_up = base * (1 + 2.0 * peak) * 0.8
-        y_down = base * (1 + 0.3 * peak) * 0.2
-
-    elif sc["type"] == "下午高峰":
-        center = sc["duration_min"] * 0.75
-        sigma = sc["duration_min"] * 0.15
-        peak = np.exp(-((t - center) ** 2) / (2 * sigma ** 2))
-        y_up = base * (1 + 0.3 * peak) * 0.2
-        y_down = base * (1 + 2.0 * peak) * 0.8
-
-    else:
-        y_up = base * 0.5 * np.ones_like(t, dtype=float)
-        y_down = base * 0.5 * np.ones_like(t, dtype=float)
-
-    # -------- 2. 潮汐客流 --------
-    if sc["tidal"]:
-        # 上午（前 1/3）：上行增强
-        # 下午（后 1/3）：下行增强
-        morning_boost = np.exp(-((t - sc["duration_min"] * 0.25) ** 2) /
-                                (2 * (sc["duration_min"] * 0.18) ** 2))
-        afternoon_boost = np.exp(-((t - sc["duration_min"] * 0.75) ** 2) /
-                                  (2 * (sc["duration_min"] * 0.18) ** 2))
-        y_up = y_up * (1 + 1.2 * morning_boost)
-        y_down = y_down * (1 + 1.2 * afternoon_boost)
-
-    # -------- 3. 突发情况 --------
-    if sc["disruption"]:
-        center = sc["disruption_center"]
-        sigma = sc["disruption_sigma"]
-        intensity = sc["disruption_intensity"]
-        burst = np.exp(-((t - center) ** 2) / (2 * sigma ** 2))
-
-        if sc["disruption_type"] == "客流突增":
-            y_up = y_up * (1 + (intensity - 1) * burst)
-            y_down = y_down * (1 + (intensity - 1) * burst * 0.5)
-
-        elif sc["disruption_type"] == "客流骤降":
-            y_up = y_up * (1 - (1 - intensity) * burst)
-            y_down = y_down * (1 - (1 - intensity) * burst)
-
-        elif sc["disruption_type"] == "双向高峰":
-            y_up = y_up * (1 + (intensity - 1) * burst)
-            y_down = y_down * (1 + (intensity - 1) * burst)
-
-    return t, y_up, y_down
+    params = {
+        "duration_min": sc["duration_min"], "scenario_type": sc["type"],
+        "peak_multiplier": 2.0, "tidal": sc["tidal"],
+        "disruption": sc["disruption"],
+        "disruption_type": sc["disruption_type"],
+        "disruption_center": sc["disruption_center"],
+        "disruption_sigma": sc["disruption_sigma"],
+        "disruption_intensity": sc["disruption_intensity"],
+    }
+    y_up, y_down = [], []
+    for minute in t:
+        moment = minute + 7.5
+        expected_total = sc["arrival_rate"] / 4 * demand_multiplier(moment, params)
+        outbound = outbound_fraction(moment, params)
+        y_up.append(expected_total * outbound)
+        y_down.append(expected_total * (1 - outbound))
+    return t, np.array(y_up), np.array(y_down)
 
 
 # ================================================================
@@ -145,7 +106,7 @@ t, y_up, y_down = generate_curve(sc)
 
 with st.container(border=True):
     st.subheader("📈 客流曲线预览")
-    st.caption("按 15 分钟粒度统计的到达人数（仿真设定，非实测）")
+    st.caption("按 15 分钟计算的模型期望人数；实际仿真使用相同强度模型作泊松抽样，结果可能波动")
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -177,6 +138,6 @@ with st.container(border=True):
     c1.metric("基准到达率", f"{sc['arrival_rate']} 人/h")
     c2.metric("上行峰值", f"{y_up.max()*4:.0f} 人/h")
     c3.metric("下行峰值", f"{y_down.max()*4:.0f} 人/h")
-    c4.metric("总到达量", f"{(y_up.sum() + y_down.sum()):.0f} 人")
+    c4.metric("期望总到达量", f"{(y_up.sum() + y_down.sum()):.0f} 人")
 
 st.success("✅ 场景已保存，可进入「智能调度控制」页运行仿真")
